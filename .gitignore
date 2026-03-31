@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+ENV/
+
+.idea/
+.vscode/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+build/
+dist/
+*.egg-info/
+
+# 本地配置/临时文件（如你后续输出日志、下载清单等）
+*.log
+*.tmp
+
