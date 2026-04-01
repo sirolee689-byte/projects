@@ -8,11 +8,10 @@ from app.config import SoftwareItem
 
 # 自动扫描模式下无单独教程文件时的默认说明
 DEFAULT_TUTORIAL = (
-    "1) 点击【下载】将安装包复制到本机下载目录。\n"
-    "2) 手动模式：下载完成后会打开文件夹，请双击安装包按向导安装。\n"
-    "3) 自动模式：MSI 默认使用 msiexec /qn；"
-    "EXE 及自定义 MSI 参数可在安装包旁放置同名 .args 文件（单行，写入静默参数）。\n\n"
-    "若静默安装失败，请改用手动模式或联系 IT。"
+    "1) 点击【下载】将安装包保存到本机下载目录。\n"
+    "2) 下载完成后点击【安装】，确认「立即安装」即可启动安装向导。\n"
+    "3) 请根据安装程序提示完成安装；若需管理员权限，请在弹窗中选择允许。\n\n"
+    "如遇安装失败，请联系 IT。"
 )
 
 _INSTALLER_EXT = {".exe", ".msi"}
@@ -38,19 +37,6 @@ def _fmt_file_meta(path: Path) -> str:
     return f"{mtime} · {sz} B"
 
 
-def _read_sidecar_silent_args(installer_path: Path) -> str:
-    """与安装包同目录、同主文件名的 .args 文件，单行静默参数（可选）。"""
-    sidecar = installer_path.with_suffix(".args")
-    if not sidecar.is_file():
-        return ""
-    try:
-        raw = sidecar.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    first = raw.splitlines()[0] if raw else ""
-    return first.strip()
-
-
 def _item_from_installer(
     installer_path: Path,
     parent_folder_trail: tuple[str, ...],
@@ -59,14 +45,12 @@ def _item_from_installer(
     """parent_folder_trail 为从共享根到安装包所在目录的文件夹名（不含文件名）。"""
     st = installer_path.stat()
     sig_parts.append(f"{installer_path.resolve()}|{st.st_mtime_ns}|{st.st_size}")
-    silent = _read_sidecar_silent_args(installer_path)
     resolved = installer_path.resolve()
     breadcrumb = " › ".join(parent_folder_trail) if parent_folder_trail else ""
     return SoftwareItem(
         name=installer_path.name,
         version=_fmt_file_meta(installer_path),
         download_url=str(resolved),
-        silent_args=silent,
         tutorial=DEFAULT_TUTORIAL,
         breadcrumb=breadcrumb,
     )

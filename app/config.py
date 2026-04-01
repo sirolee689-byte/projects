@@ -10,6 +10,5 @@ class SoftwareItem:
     name: str
     version: str
     download_url: str
-    silent_args: str
     tutorial: str
     breadcrumb: str = ""

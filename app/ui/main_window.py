@@ -6,7 +6,6 @@ from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QFileIconProvider,
     QFrame,
     QHBoxLayout,
@@ -14,7 +13,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QSplitter,
     QTextEdit,
@@ -27,8 +25,8 @@ from PySide6.QtWidgets import (
 
 from app.catalog import CatalogDirNode, scan_share_root
 from app.config import SoftwareItem
-from app.downloader import download_streaming
-from app.installer import open_in_explorer, run_silent_installer
+from app.downloader import download_streaming, expected_local_download_path
+from app.installer import open_download_folder, run_installer_interactive
 
 # 浅色界面样式（零外部资源）
 _APP_STYLESHEET = """
@@ -95,10 +93,6 @@ QTextEdit {
     padding: 10px;
     font-size: 13px;
     color: #2c3340;
-}
-QRadioButton {
-    spacing: 8px;
-    color: #3d4f6f;
 }
 QPushButton {
     padding: 8px 18px;
@@ -215,13 +209,6 @@ class MainWindow(QWidget):
         self._tutorial.setReadOnly(True)
         self._tutorial.setMinimumHeight(160)
 
-        self._radio_manual = QRadioButton("手动模式（下载后打开文件夹）")
-        self._radio_auto = QRadioButton("自动安装（静默参数后台执行）")
-        self._radio_manual.setChecked(True)
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self._radio_manual)
-        self._mode_group.addButton(self._radio_auto)
-
         self._btn_download = QPushButton("下载")
         self._btn_download.setObjectName("BtnPrimary")
         self._btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -257,8 +244,6 @@ class MainWindow(QWidget):
         right_inner.addWidget(self._meta)
         right_inner.addWidget(sec_tutorial)
         right_inner.addWidget(self._tutorial, 1)
-        right_inner.addWidget(self._radio_manual)
-        right_inner.addWidget(self._radio_auto)
 
         actions = QHBoxLayout()
         actions.setSpacing(10)
@@ -367,8 +352,6 @@ class MainWindow(QWidget):
         prev_url = self._current_item_download_url()
 
         self._tree.clear()
-        self._last_download_path = None
-        self._btn_install.setEnabled(False)
         self._progress.setValue(0)
 
         if not self._share_root.exists():
@@ -376,6 +359,7 @@ class MainWindow(QWidget):
             self._meta.setText("无法访问共享根目录，请检查网络与权限。")
             self._tutorial.clear()
             self._selected = None
+            self._update_install_button_state()
             return
 
         if not entries:
@@ -383,6 +367,7 @@ class MainWindow(QWidget):
             self._meta.setText("共享目录中尚未发现 .exe / .msi 安装包（任意子文件夹内均可）。")
             self._tutorial.clear()
             self._selected = None
+            self._update_install_button_state()
             return
 
         for e in entries:
@@ -402,6 +387,7 @@ class MainWindow(QWidget):
             self._title.setText("请选择安装包")
             self._meta.clear()
             self._tutorial.clear()
+            self._update_install_button_state()
 
     def _iter_software_items(self):
         it = QTreeWidgetItemIterator(self._tree)
@@ -430,9 +416,21 @@ class MainWindow(QWidget):
         for p in paths:
             self._watcher.addPath(p)
 
+    def _update_install_button_state(self) -> None:
+        """根据当前选中项在下载目录中是否已有同名文件，控制安装按钮亮/灰。"""
+        if not self._selected:
+            self._last_download_path = None
+            self._btn_install.setEnabled(False)
+            return
+        local = expected_local_download_path(self._selected.download_url, self._download_dir)
+        if local.is_file():
+            self._last_download_path = local.resolve()
+            self._btn_install.setEnabled(True)
+        else:
+            self._last_download_path = None
+            self._btn_install.setEnabled(False)
+
     def _on_tree_select(self, current: QTreeWidgetItem | None, _prev: QTreeWidgetItem | None) -> None:
-        self._last_download_path = None
-        self._btn_install.setEnabled(False)
         self._progress.setValue(0)
 
         if not current:
@@ -440,6 +438,7 @@ class MainWindow(QWidget):
             self._title.setText("请选择安装包")
             self._meta.clear()
             self._tutorial.clear()
+            self._update_install_button_state()
             return
 
         it = current.data(0, Qt.ItemDataRole.UserRole)
@@ -448,14 +447,15 @@ class MainWindow(QWidget):
             self._title.setText(current.text(0))
             self._meta.setText("此为文件夹，请继续展开并选择安装包。")
             self._tutorial.clear()
+            self._update_install_button_state()
             return
 
         self._selected = it
         self._title.setText(it.name)
         loc = f"位置：{it.breadcrumb}" if it.breadcrumb else "位置：共享根目录"
-        silent = it.silent_args.strip() if it.silent_args.strip() else "（默认，见安装说明）"
-        self._meta.setText(f"{loc}\n文件信息：{it.version}\n静默参数：{silent}")
+        self._meta.setText(f"{loc}\n文件信息：{it.version}")
         self._tutorial.setPlainText(it.tutorial or "（未提供教程）")
+        self._update_install_button_state()
 
     def _on_download_clicked(self) -> None:
         if not self._selected:
@@ -465,6 +465,18 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "提示", "正在处理中，请稍候。")
             return
 
+        local_path = expected_local_download_path(self._selected.download_url, self._download_dir)
+        if local_path.is_file():
+            reply = QMessageBox.question(
+                self,
+                "检测到已下载",
+                f"本地下载目录中已有同名安装包（可能此前已下载过）：\n{local_path}\n\n是否覆盖并重新下载？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         self._btn_download.setEnabled(False)
         self._btn_install.setEnabled(False)
         self._progress.setValue(0)
@@ -473,7 +485,7 @@ class MainWindow(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_download_ok)
         self._worker.failed.connect(self._on_download_failed)
-        self._worker.finished.connect(lambda: self._btn_download.setEnabled(True))
+        self._worker.finished.connect(self._on_download_worker_finished)
         self._worker.start()
 
     def _on_progress(self, downloaded: int, total: int) -> None:
@@ -483,16 +495,26 @@ class MainWindow(QWidget):
         else:
             self._progress.setRange(0, 0)
 
+    def _on_download_worker_finished(self) -> None:
+        self._btn_download.setEnabled(True)
+        self._update_install_button_state()
+
     def _on_download_ok(self, path_str: str) -> None:
         self._progress.setRange(0, 100)
         self._progress.setValue(100)
-        self._last_download_path = Path(path_str)
-        self._btn_install.setEnabled(True)
 
-        QMessageBox.information(self, "下载完成", f"已保存到：\n{path_str}")
-
-        if self._radio_manual.isChecked():
-            open_in_explorer(self._last_download_path)
+        reply = QMessageBox.question(
+            self,
+            "下载完成",
+            f"已保存到：\n{path_str}\n\n是否打开下载所在的文件夹？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                open_download_folder(Path(path_str))
+            except OSError as e:
+                QMessageBox.warning(self, "无法打开文件夹", str(e))
 
     def _on_download_failed(self, msg: str) -> None:
         self._progress.setRange(0, 100)
@@ -500,20 +522,27 @@ class MainWindow(QWidget):
         QMessageBox.critical(self, "下载失败", msg)
 
     def _on_install_clicked(self) -> None:
-        if not self._selected or not self._last_download_path:
-            QMessageBox.information(self, "提示", "请先完成下载。")
+        if not self._last_download_path or not self._last_download_path.exists():
+            QMessageBox.information(self, "提示", "请先点击「下载」将安装包保存到本机，再使用「安装」。")
+            return
+        if not self._selected:
+            QMessageBox.information(self, "提示", "请先选择一个安装包。")
             return
 
-        if self._radio_manual.isChecked():
-            QMessageBox.information(self, "手动安装", "将打开下载目录，请按右侧说明操作。")
-            open_in_explorer(self._last_download_path)
+        reply = QMessageBox.question(
+            self,
+            "立即安装",
+            "是否立即运行已下载的安装程序？\n（将打开安装向导，请按界面提示操作。）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         try:
-            run_silent_installer(self._last_download_path, self._selected.silent_args)
-            QMessageBox.information(self, "已开始安装", "安装进程已在后台启动。")
+            run_installer_interactive(self._last_download_path)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "安装失败", str(e))
+            QMessageBox.critical(self, "无法启动安装程序", str(e))
 
 
 def run_main_window(share_root: Path, download_dir: Path) -> None:

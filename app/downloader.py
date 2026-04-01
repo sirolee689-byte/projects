@@ -19,6 +19,11 @@ def _filename_from_source(source: str) -> str:
     return name or "download.bin"
 
 
+def expected_local_download_path(source: str, dest_dir: Path) -> Path:
+    """与 download_streaming 写入规则一致的本地下载路径（用于判断是否已存在）。"""
+    return dest_dir / _filename_from_source(source)
+
+
 def download_streaming(
     source: str,
     dest_dir: Path,
@@ -35,7 +40,7 @@ def download_streaming(
     - UNC：total_bytes 来自文件大小（若可获取）
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / _filename_from_source(source)
+    dest_path = expected_local_download_path(source, dest_dir)
 
     if source.startswith("\\\\") or source.startswith("//"):
         src_path = Path(source)

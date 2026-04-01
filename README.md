@@ -1,59 +1,61 @@
-# 内网软件助手（桌面端）
+# 内网软件助手
 
-这是一个用于公司内网环境的软件下载安装助手（Windows），基于 **PySide6** 开发。
+Windows 桌面小工具：从内网共享目录浏览安装包、下载到本机并以向导方式安装。基于 **Python 3** + **PySide6**。
 
-## 目录结构
+## 功能概要
 
-```text
-UB_AI/
-  main.py
-  config.json
-  app/
-    __init__.py
-    main.py
-    config.py
-    settings.py
-    downloader.py
-    installer.py
-    ui/
-      __init__.py
-      main_window.py
-  software_list.json
-  requirements.txt
-  README.md
-  .gitignore
-```
+| 能力 | 说明 |
+|------|------|
+| 自动目录树 | 读取 `share_root` 下多级文件夹，`.exe` / `.msi` 自动出现在树中，**无需**维护软件列表 JSON |
+| 下载 | 支持 **UNC** 与 **HTTP(S)**；下载前若本地已有同名文件会询问是否覆盖 |
+| 安装 | 仅当本地下载目录中**已有对应文件**时「安装」可点；确认后以系统默认方式运行安装包（图形向导） |
+| 同步 | 目录变更监听 + UNC 轮询 + 手动刷新 |
 
-## 安装依赖
+详细变更见 **[CHANGELOG.md](./CHANGELOG.md)**。
 
-在该目录下执行：
+## 环境要求
+
+- Windows（本机路径、`explorer`、`os.startfile` 等按 Windows 设计）
+- Python 3.10+（建议）
+
+## 快速开始
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 运行
-
-```bash
 python main.py
 ```
 
-也可以：
+或使用模块入口：
 
 ```bash
 python -m app.main
 ```
 
-## 配置说明（software_list.json）
+## 配置（`config.json`）
 
-- **name**：软件名
-- **download_url**：下载源（支持内网 UNC 路径如 `\\192.168.1.33\tools\apps\xxx.exe`，也兼容 HTTP/HTTPS）
-- **version**：版本号（仅展示用）
-- **silent_args**：静默安装参数（不同安装包不同）
-- **tutorial**：安装教程说明（支持换行）
+| 字段 | 含义 |
+|------|------|
+| `share_root` | 共享根路径（如 `\\server\share\apps`），目录结构即分类与层级 |
+| `download_dir` | 本机保存安装包的目录 |
 
-## 基础配置（config.json）
+共享目录中：**仅包含有安装包的文件夹会出现在树上**；根目录下也可直接放置 `.exe` / `.msi`。
 
-- **download_dir**：下载到本地的目录（例如 `C:\Temp\InternalApp`）
-- **share_root**：共享目录根路径（例如 `\\192.168.1.33\tools\apps`）
+## 项目结构（节选）
 
+```text
+main.py
+config.json
+requirements.txt
+CHANGELOG.md
+app/
+  catalog.py      # 扫描共享目录、生成目录树数据
+  config.py       # SoftwareItem 等模型
+  downloader.py   # 下载/复制与目标路径
+  installer.py    # 启动安装包、打开下载文件夹
+  settings.py     # 读取 config.json
+  ui/main_window.py
+```
+
+## 许可证
+
+对外发布到 GitHub 时，请自行添加 `LICENSE` 并在本段写明授权方式。
