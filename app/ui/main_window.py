@@ -7,15 +7,18 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileIconProvider,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QTextEdit,
+    QMenu,
     QTreeWidget,
     QTreeWidgetItem,
     QTreeWidgetItemIterator,
@@ -27,6 +30,8 @@ from app.catalog import CatalogDirNode, scan_share_root
 from app.config import SoftwareItem
 from app.downloader import download_streaming, expected_local_download_path
 from app.installer import open_download_folder, run_installer_interactive
+from app.updater.worker import CommonSoftwareUpdateWorker, is_admin
+from app.updater.custom_sources import CustomSource, load_custom_sources, normalize_software_key, save_custom_sources
 
 # 浅色界面样式（零外部资源）
 _APP_STYLESHEET = """
@@ -69,6 +74,18 @@ QHeaderView::section {
     border-bottom: 1px solid #e5e9f0;
     font-weight: 600;
     font-size: 12px;
+}
+QLineEdit#SearchBox {
+    background-color: #fbfcfe;
+    border: 1px solid #e5e9f0;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #1a1a1a;
+}
+QLineEdit#SearchBox:focus {
+    border: 1px solid #9bb8f6;
+    background-color: #ffffff;
 }
 QLabel#TitleLabel {
     font-size: 18px;
@@ -189,6 +206,14 @@ class MainWindow(QWidget):
         self._tree.setAnimated(True)
         self._tree.setIndentation(18)
         self._tree.currentItemChanged.connect(self._on_tree_select)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+
+        self._search = QLineEdit()
+        self._search.setObjectName("SearchBox")
+        self._search.setPlaceholderText("搜索软件或文件夹（支持模糊匹配）")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
 
         self._btn_refresh = QPushButton("刷新目录")
         self._btn_refresh.setObjectName("BtnGhost")
@@ -228,6 +253,7 @@ class MainWindow(QWidget):
         left_inner = QVBoxLayout()
         left_inner.setContentsMargins(14, 14, 14, 14)
         left_inner.setSpacing(10)
+        left_inner.addWidget(self._search, 0)
         left_inner.addWidget(self._tree, 1)
         left_inner.addWidget(self._btn_refresh, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -272,6 +298,7 @@ class MainWindow(QWidget):
         self.setStyleSheet(_APP_STYLESHEET)
 
         self._worker: DownloadWorker | None = None
+        self._update_worker: CommonSoftwareUpdateWorker | None = None
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -310,6 +337,7 @@ class MainWindow(QWidget):
         self._watch_dir_list = watch_dirs
         self._rebuild_tree(entries)
         self._update_watcher_paths()
+        self._apply_filter()
 
     def _current_item_download_url(self) -> str | None:
         cur = self._tree.currentItem()
@@ -323,6 +351,7 @@ class MainWindow(QWidget):
     def _add_dir_item(self, parent: QTreeWidget | QTreeWidgetItem, node: CatalogDirNode) -> None:
         row = QTreeWidgetItem([node.display_name])
         row.setIcon(0, self._folder_icon)
+        row.setData(0, Qt.ItemDataRole.UserRole, ("dir", node.abs_path))
         row.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         for sub in node.subdirs:
             self._add_dir_item(row, sub)
@@ -388,6 +417,91 @@ class MainWindow(QWidget):
             self._meta.clear()
             self._tutorial.clear()
             self._update_install_button_state()
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return "".join(text.casefold().split())
+
+    @classmethod
+    def _fuzzy_match(cls, query: str, text: str) -> bool:
+        """
+        模糊匹配：先做包含匹配；否则做“子序列”匹配（例如 q=abc 可命中 a...b...c）。
+        大小写不敏感、忽略空白。
+        """
+        q = cls._norm(query)
+        if not q:
+            return True
+        t = cls._norm(text)
+        if not t:
+            return False
+        if q in t:
+            return True
+        qi = 0
+        for ch in t:
+            if ch == q[qi]:
+                qi += 1
+                if qi >= len(q):
+                    return True
+        return False
+
+    def _item_matches_query(self, item: QTreeWidgetItem, query: str) -> bool:
+        text = item.text(0)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(data, SoftwareItem) and data.breadcrumb:
+            text = f"{text} {data.breadcrumb}"
+        return self._fuzzy_match(query, text)
+
+    def _filter_tree_item(self, item: QTreeWidgetItem, query: str) -> bool:
+        matched_self = self._item_matches_query(item, query)
+        any_child_visible = False
+        for i in range(item.childCount()):
+            ch = item.child(i)
+            if self._filter_tree_item(ch, query):
+                any_child_visible = True
+        visible = matched_self or any_child_visible
+        item.setHidden(not visible)
+        if query.strip() and any_child_visible:
+            item.setExpanded(True)
+        return visible
+
+    def _apply_filter(self) -> None:
+        query = self._search.text()
+        if not query.strip():
+            # 清空过滤：全部显示，但不强制改变用户展开状态（仅确保根可见）
+            for i in range(self._tree.topLevelItemCount()):
+                top = self._tree.topLevelItem(i)
+                self._show_all(top)
+            self._update_install_button_state()
+            return
+
+        any_visible = False
+        for i in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(i)
+            if self._filter_tree_item(top, query):
+                any_visible = True
+
+        cur = self._tree.currentItem()
+        if cur and cur.isHidden():
+            first = self._first_visible_software_item()
+            if first:
+                self._tree.setCurrentItem(first)
+        elif not cur and any_visible:
+            first = self._first_visible_software_item()
+            if first:
+                self._tree.setCurrentItem(first)
+
+        self._update_install_button_state()
+
+    def _show_all(self, item: QTreeWidgetItem) -> None:
+        item.setHidden(False)
+        for i in range(item.childCount()):
+            self._show_all(item.child(i))
+
+    def _first_visible_software_item(self) -> QTreeWidgetItem | None:
+        for item in self._iter_software_items():
+            if not item.isHidden():
+                return item
+        return None
 
     def _iter_software_items(self):
         it = QTreeWidgetItemIterator(self._tree)
@@ -456,6 +570,76 @@ class MainWindow(QWidget):
         self._meta.setText(f"{loc}\n文件信息：{it.version}")
         self._tutorial.setPlainText(it.tutorial or "（未提供教程）")
         self._update_install_button_state()
+
+    def _common_root(self) -> Path:
+        return (self._share_root / "常用软件").resolve()
+
+    def _software_key_for_installer(self, it: SoftwareItem) -> str | None:
+        try:
+            p = Path(it.download_url).resolve()
+            rel = p.relative_to(self._common_root())
+        except Exception:  # noqa: BLE001
+            return None
+        # 常用软件\<软件名>\...\xxx.exe  -> 软件名
+        if len(rel.parts) >= 2:
+            return self._normalize_software_key(rel.parts[0])
+        # 直接放在常用软件根下：用文件名 stem 兜底
+        return self._normalize_software_key(Path(it.name).stem) if it.name else None
+
+    @staticmethod
+    def _normalize_software_key(raw: str) -> str:
+        return normalize_software_key(raw)
+
+    def _is_common_installer_item(self, item: QTreeWidgetItem) -> tuple[SoftwareItem, str] | None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(data, SoftwareItem):
+            return None
+        key = self._software_key_for_installer(data)
+        if not key:
+            return None
+        return data, key
+
+    def _on_tree_context_menu(self, pos) -> None:  # type: ignore[no-untyped-def]
+        item = self._tree.itemAt(pos)
+        if not item:
+            return
+        hit = self._is_common_installer_item(item)
+        if not hit:
+            return
+
+        _it, key = hit
+        menu = QMenu(self)
+        act_update = menu.addAction("更新软件")
+        act_manage = menu.addAction("管理更新源")
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen == act_update:
+            self._on_update_single_software_clicked(key)
+        elif chosen == act_manage:
+            self._on_manage_update_source_clicked(key)
+
+    def _on_update_single_software_clicked(self, software_key: str) -> None:
+        if not is_admin():
+            QMessageBox.warning(self, "无权限", "仅管理员可执行「更新软件」。\n请用管理员权限运行本程序。")
+            return
+        dlg = _UpdateDialog(self)
+        dlg.start(self._share_root, self._custom_sources_path(), target_software_key=software_key)
+        dlg.exec()
+        self._force_refresh_catalog()
+
+    @staticmethod
+    def _app_root() -> Path:
+        # app/ui/main_window.py -> app/ui -> app -> repo_root
+        return Path(__file__).resolve().parents[2]
+
+    def _custom_sources_path(self) -> Path:
+        return self._app_root() / "update_sources.json"
+
+    def _on_manage_update_source_clicked(self, software_key: str) -> None:
+        if not is_admin():
+            QMessageBox.warning(self, "无权限", "仅管理员可管理更新源。")
+            return
+        dlg = _ManageSourceDialog(self, self._custom_sources_path(), software_key)
+        dlg.exec()
 
     def _on_download_clicked(self) -> None:
         if not self._selected:
@@ -550,3 +734,182 @@ def run_main_window(share_root: Path, download_dir: Path) -> None:
     w = MainWindow(share_root, download_dir)
     w.show()
     app.exec()
+
+
+class _UpdateDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("常用软件自动更新")
+        self.resize(720, 520)
+        self.setModal(True)
+
+        self._lbl_current = QLabel("准备开始…")
+        self._lbl_current.setObjectName("TitleLabel")
+        self._lbl_overall = QLabel("")
+        self._lbl_overall.setObjectName("MetaLabel")
+        self._lbl_file = QLabel("")
+        self._lbl_file.setObjectName("MetaLabel")
+
+        self._bar_overall = QProgressBar()
+        self._bar_overall.setRange(0, 100)
+        self._bar_overall.setValue(0)
+        self._bar_overall.setTextVisible(True)
+
+        self._bar_file = QProgressBar()
+        self._bar_file.setRange(0, 100)
+        self._bar_file.setValue(0)
+        self._bar_file.setTextVisible(True)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+        root.addWidget(self._lbl_current)
+        root.addWidget(self._lbl_overall)
+        root.addWidget(self._bar_overall)
+        root.addWidget(self._lbl_file)
+        root.addWidget(self._bar_file)
+        root.addWidget(self._log, 1)
+
+        self._worker: CommonSoftwareUpdateWorker | None = None
+
+    def start(
+        self,
+        share_root: Path,
+        custom_sources_path: Path | None = None,
+        target_software_key: str | None = None,
+    ) -> None:
+        if self._worker and self._worker.isRunning():
+            return
+        self._worker = CommonSoftwareUpdateWorker(
+            share_root,
+            custom_sources_path=custom_sources_path,
+            target_software_key=target_software_key,
+        )
+        self._worker.current.connect(self._on_current)
+        self._worker.progress.connect(self._on_overall_progress)
+        self._worker.file_progress.connect(self._on_file_progress)
+        self._worker.detail.connect(self._append_log)
+        self._worker.failed_fatal.connect(self._on_fatal)
+        self._worker.finished_summary.connect(self._on_finished)
+        self._worker.start()
+
+    def _on_current(self, name: str) -> None:
+        self._lbl_current.setText(f"正在更新：{name}")
+        self._bar_file.setRange(0, 100)
+        self._bar_file.setValue(0)
+        self._lbl_file.setText("")
+
+    def _on_overall_progress(self, done: int, total: int) -> None:
+        pct = int(done * 100 / total) if total > 0 else 0
+        self._bar_overall.setValue(max(0, min(100, pct)))
+        self._lbl_overall.setText(f"进度：{done}/{total}")
+
+    def _on_file_progress(self, downloaded: int, total: int) -> None:
+        if total <= 0:
+            self._bar_file.setRange(0, 0)
+            self._lbl_file.setText("下载中…")
+            return
+        self._bar_file.setRange(0, 100)
+        pct = int(downloaded * 100 / total)
+        self._bar_file.setValue(max(0, min(100, pct)))
+        mb = downloaded / (1024 * 1024)
+        total_mb = total / (1024 * 1024)
+        self._lbl_file.setText(f"下载：{mb:.1f} / {total_mb:.1f} MB")
+
+    def _append_log(self, line: str) -> None:
+        self._log.append(line)
+
+    def _on_fatal(self, msg: str) -> None:
+        self._append_log(f"[终止] {msg}")
+        QMessageBox.critical(self, "更新终止", msg)
+        self.close()
+
+    def _on_finished(self, updated: int, skipped: int, failed: int) -> None:
+        self._append_log(f"\n汇总：更新 {updated}，跳过 {skipped}，失败 {failed}")
+        if failed == 0:
+            QMessageBox.information(self, "完成", "全部常用软件已更新到最新版。")
+        else:
+            QMessageBox.warning(self, "完成（有失败）", f"更新完成：成功 {updated}，跳过 {skipped}，失败 {failed}。\n请查看日志。")
+        self.close()
+
+
+class _ManageSourceDialog(QDialog):
+    def __init__(self, parent: QWidget | None, path: Path, software_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("管理更新源")
+        self.resize(720, 260)
+        self.setModal(True)
+        self._path = path
+        self._software_key = software_key
+
+        title = QLabel(f"软件名称：{software_key}")
+        title.setObjectName("TitleLabel")
+
+        self._input = QLineEdit()
+        self._input.setObjectName("SearchBox")
+        self._input.setPlaceholderText("更新源链接（直链 / 页面 / API，程序会自动提取版本号与下载链接）")
+
+        hint = QLabel("提示：该链接返回内容中最好包含版本号与安装包下载链接（exe/msi）。保存后更新会优先使用该配置。")
+        hint.setObjectName("MetaLabel")
+        hint.setWordWrap(True)
+
+        btn_save = QPushButton("保存")
+        btn_save.setObjectName("BtnPrimary")
+        btn_save.clicked.connect(self._save)
+        btn_clear = QPushButton("清除该软件配置")
+        btn_clear.setObjectName("BtnGhost")
+        btn_clear.clicked.connect(self._clear)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(btn_clear)
+        actions.addWidget(btn_save)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+        root.addWidget(title)
+        root.addWidget(self._input)
+        root.addWidget(hint)
+        root.addLayout(actions)
+
+        self._load_existing()
+
+    def _load_existing(self) -> None:
+        try:
+            items = load_custom_sources(self._path)
+            for it in items:
+                if it.software_key == self._software_key:
+                    self._input.setText(it.update_source_url)
+                    return
+        except Exception:  # noqa: BLE001
+            return
+
+    def _save(self) -> None:
+        url = (self._input.text() or "").strip()
+        if not url:
+            QMessageBox.warning(self, "提示", "请先填写更新源链接。")
+            return
+        try:
+            items = load_custom_sources(self._path)
+        except Exception:
+            items = []
+        # upsert
+        new_items = [it for it in items if it.software_key != self._software_key]
+        new_items.append(CustomSource(self._software_key, url))
+        save_custom_sources(self._path, new_items)
+        QMessageBox.information(self, "已保存", "更新源已保存。后续更新会优先使用该链接。")
+        self.close()
+
+    def _clear(self) -> None:
+        try:
+            items = load_custom_sources(self._path)
+        except Exception:
+            items = []
+        new_items = [it for it in items if it.software_key != self._software_key]
+        save_custom_sources(self._path, new_items)
+        QMessageBox.information(self, "已清除", "该软件的自定义更新源已清除。")
+        self.close()

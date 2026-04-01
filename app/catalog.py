@@ -22,6 +22,7 @@ class CatalogDirNode:
     """目录节点：与共享目录层级一致，仅保存展示用文件夹名。"""
 
     display_name: str
+    abs_path: str
     subdirs: tuple[CatalogDirNode, ...]
     installers: tuple[SoftwareItem, ...]
 
@@ -96,6 +97,7 @@ def _build_dir_node(
 
     return CatalogDirNode(
         display_name=dir_path.name,
+        abs_path=str(dir_path.resolve()),
         subdirs=tuple(subnodes),
         installers=tuple(installers),
     )

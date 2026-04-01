@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "items": [
+    {
+      "software_key": "WeChatSetup",
+      "update_source_url": "https://pc.weixin.qq.com/"
+    }
+  ]
+}
