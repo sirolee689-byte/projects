@@ -16,15 +16,33 @@ def open_in_explorer(path: Path) -> None:
 def run_silent_installer(exe_path: Path, silent_args: str) -> subprocess.Popen:
     """
     以后台方式执行安装程序（不阻塞 UI）。
-    注意：不同安装包的静默参数不同，silent_args 由配置提供。
+    EXE：使用 silent_args（按空格拆分追加到命令行）。
+    MSI：若无 silent_args，则使用 msiexec /i ... /qn；若有则作为 msiexec 的附加参数追加。
     """
     if not exe_path.exists():
         raise FileNotFoundError(str(exe_path))
 
+    suffix = exe_path.suffix.lower()
+    if suffix == ".msi":
+        cmd = ["msiexec", "/i", str(exe_path)]
+        extra = silent_args.strip()
+        if extra:
+            cmd.extend(extra.split())
+        else:
+            cmd.append("/qn")
+        return subprocess.Popen(
+            cmd,
+            cwd=str(exe_path.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
+        )
+
     cmd = [str(exe_path)]
-    if silent_args:
-        # 允许用户在配置里写多个参数（简单按空格拆分）
-        cmd += silent_args.split()
+    if silent_args.strip():
+        cmd.extend(silent_args.split())
 
     return subprocess.Popen(
         cmd,

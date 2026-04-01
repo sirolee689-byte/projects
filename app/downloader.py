@@ -14,7 +14,7 @@ def _filename_from_source(source: str) -> str:
         name = os.path.basename(source.replace("/", "\\"))
         return name or "download.bin"
 
-    parsed = urlparse(url)
+    parsed = urlparse(source)
     name = os.path.basename(parsed.path)
     return name or "download.bin"
 
